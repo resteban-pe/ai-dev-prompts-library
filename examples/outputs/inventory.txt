@@ -1,0 +1,34 @@
+============================================================
+INVENTARIO DE PROMPTS
+Directorio : prompts
+Total      : 4 prompt(s)
+============================================================
+
+[1] Design Microservice
+    Archivo   : prompts\architecture\design_microservice.md
+    Proposito : Diseñar la arquitectura de un microservicio desde cero: responsabilidades,
+    Variables : other_nfr, parent_system, responsibility, service_interactions, service_name, sla, tech_constraints, throughput
+    Estado    : OK
+
+[2] Generate Spring Service
+    Archivo   : prompts\code_generation\generate_spring_service.md
+    Proposito : Generar un servicio Spring Boot completo con su interfaz, implementación,
+    Variables : additional_dependencies, business_rules, entity_name, functional_description, operations_list, repository_name, service_name
+    Estado    : OK
+
+[3] Review Java Class
+    Archivo   : prompts\code_review\review_java_class.md
+    Proposito : Analizar una clase Java en busca de problemas de diseño, bugs potenciales, 
+    Variables : class_name, framework, project_context
+    Estado    : OK
+
+[4] Generate README Section
+    Archivo   : prompts\documentation\generate_readme_section.md
+    Proposito : Generar secciones de README profesionales para proyectos de software,
+    Variables : max_lines, output_language, project_name, project_type, section_name, section_specific_info, target_audience, tech_stack, tone
+    Estado    : OK
+
+============================================================
+Para ejecutar un prompt:
+  python scripts/run_prompt.py --prompt <archivo> --var KEY=VALUE
+============================================================

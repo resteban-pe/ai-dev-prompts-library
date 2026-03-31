@@ -1,0 +1,291 @@
+# Code Review: OrderService
+
+> ⚠️ **Nota:** No proporcionaste el código fuente. Basaré el review en los **anti-patrones más comunes** en servicios de este tipo dentro del stack indicado. **Comparte el código** para un análisis preciso y accionable.
+
+---
+
+Dicho esto, aquí tienes el framework de revisión que aplicaré cuando lo compartas, junto con los problemas más frecuentes que encuentro en clases `OrderService` en microservicios de pagos con Spring Boot 3 / Java 21:
+
+---
+
+## 🔴 CRÍTICO
+
+### C-1: Transaccionalidad incorrecta o ausente
+
+```java
+// ❌ Patrón problemático frecuente
+public class OrderService {
+    public void processOrder(Order order) {
+        orderRepository.save(order);          // Si esto pasa...
+        paymentGateway.charge(order);         // ...y esto falla,
+        notificationService.notify(order);    // quedamos en estado inconsistente
+    }
+}
+```
+
+```java
+// ✅ Correcto
+@Transactional(rollbackFor = Exception.class)
+public void processOrder(Order order) {
+    // Operaciones de DB dentro de la transacción
+    // Llamadas externas DESPUÉS del commit (via eventos)
+}
+```
+
+**Por qué es crítico en pagos:** Un fallo parcial entre el cobro y la persistencia genera inconsistencias financieras difíciles de reconciliar.
+
+---
+
+### C-2: Llamadas a sistemas externos dentro de `@Transactional`
+
+```java
+// ❌ Nunca hagas esto
+@Transactional
+public void processOrder(Order order) {
+    orderRepository.save(order);
+    paymentGateway.charge(order);  // Llamada HTTP dentro de tx → conexión DB bloqueada
+}
+```
+
+```java
+// ✅ Patrón correcto: Outbox Pattern
+@Transactional
+public void processOrder(Order order) {
+    orderRepository.save(order);
+    outboxRepository.save(new OutboxEvent("PAYMENT_REQUESTED", order.getId()));
+    // Un worker/scheduler procesa el outbox de forma asíncrona
+}
+```
+
+---
+
+### C-3: Manejo de excepciones que silencia errores
+
+```java
+// ❌ Patrón peligroso
+public void processOrder(Order order) {
+    try {
+        paymentGateway.charge(order);
+    } catch (Exception e) {
+        log.error("Error: " + e.getMessage()); // Stack trace perdido
+        // No relanza, no compensa → fallo silencioso
+    }
+}
+```
+
+```java
+// ✅ Correcto
+public void processOrder(Order order) {
+    try {
+        paymentGateway.charge(order);
+    } catch (PaymentGatewayException e) {
+        log.error("Payment failed for orderId={}", order.getId(), e); // SLF4J con throwable
+        compensate(order);
+        throw new OrderProcessingException("Payment failed", e); // Relanza tipada
+    }
+}
+```
+
+---
+
+### C-4: Ausencia de idempotencia en operaciones de pago
+
+```java
+// ❌ Sin idempotencia → doble cobro en retries
+public void processOrder(Order order) {
+    paymentGateway.charge(order);
+}
+
+// ✅ Con idempotency key
+public void processOrder(Order order) {
+    String idempotencyKey = generateKey(order.getId(), order.getVersion());
+    
+    if (paymentRepository.existsByIdempotencyKey(idempotencyKey)) {
+        log.info("Duplicate request detected for orderId={}", order.getId());
+        return;
+    }
+    paymentGateway.charge(order, idempotencyKey);
+}
+```
+
+---
+
+## 🟡 ADVERTENCIA
+
+### W-1: Violación de Single Responsibility Principle
+
+```java
+// ❌ Clase que hace demasiado
+public class OrderService {
+    public Order createOrder(...) { }
+    public void processPayment(...) { }
+    public void sendConfirmationEmail(...) { }
+    public void updateInventory(...) { }
+    public List<Order> generateReport(...) { }
+    public void applyDiscount(...) { }
+}
+```
+
+```java
+// ✅ Responsabilidades separadas
+@Service public class OrderCreationService { }
+@Service public class PaymentProcessingService { }
+@Service public class OrderNotificationService { }
+// OrderService actúa como facade/orchestrator si es necesario
+```
+
+---
+
+### W-2: Inyección por campo (`@Autowired`) en lugar de constructor
+
+```java
+// ❌ Dificulta testing e inmutabilidad
+@Service
+public class OrderService {
+    @Autowired private OrderRepository orderRepository;
+    @Autowired private PaymentGateway paymentGateway;
+}
+```
+
+```java
+// ✅ Inyección por constructor (inmutable, testeable)
+@Service
+@RequiredArgsConstructor // Lombok, o constructor manual
+public class OrderService {
+    private final OrderRepository orderRepository;
+    private final PaymentGateway paymentGateway;
+}
+```
+
+---
+
+### W-3: Exposición directa de entidades JPA en la capa de servicio
+
+```java
+// ❌ Acoplamiento fuerte, riesgo de lazy loading fuera de contexto
+public Order getOrder(Long id) {
+    return orderRepository.findById(id).get(); // .get() sin Optional handling
+}
+
+// ✅ Con DTO + Optional correcto
+public OrderDTO getOrder(Long id) {
+    return orderRepository.findById(id)
+        .map(orderMapper::toDTO)
+        .orElseThrow(() -> new OrderNotFoundException(id));
+}
+```
+
+---
+
+### W-4: No aprovechar Java 21 — uso de patrones legacy
+
+```java
+// ❌ Java 8 style en codebase Java 21
+public String getStatusMessage(Order order) {
+    if (order.getStatus() == OrderStatus.PAID) {
+        return "Paid";
+    } else if (order.getStatus() == OrderStatus.PENDING) {
+        return "Pending";
+    } else {
+        return "Unknown";
+    }
+}
+
+// ✅ Pattern matching + sealed classes (Java 21)
+public String getStatusMessage(OrderStatus status) {
+    return switch (status) {
+        case PAID    -> "Paid";
+        case PENDING -> "Pending";
+        case FAILED  -> "Failed";
+        // Compilador verifica exhaustividad con sealed types
+    };
+}
+```
+
+---
+
+## 🔵 SUGERENCIA
+
+### S-1: Logging estructurado y trazabilidad
+
+```java
+// ❌ Logging no estructurado, dificulta búsqueda en Splunk/ELK
+log.info("Processing order " + orderId + " for user " + userId);
+
+// ✅ Structured logging con MDC para correlación
+MDC.put("orderId", orderId.toString());
+MDC.put("userId", userId.toString());
+log.info("Processing order initiated amount={} currency={}", amount, currency);
+// El MDC se propaga automáticamente en el log output (JSON)
+```
+
+---
+
+### S-2: Validación en capa de servicio con Bean Validation
+
+```java
+// ❌ Validación manual, verbose y no reutilizable
+public void createOrder(OrderRequest request) {
+    if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+        throw new IllegalArgumentException("Invalid amount");
+    }
+}
+
+// ✅ Con Jakarta Validation + @Validated en el servicio
+@Service
+@Validated
+public class OrderService {
+    public void createOrder(@Valid OrderRequest request) { ... }
+}
+
+public record OrderRequest(
+    @NotNull @DecimalMin("0.01") BigDecimal amount,
+    @NotBlank String currency,
+    @NotNull UUID customerId
+) { }
+```
+
+---
+
+### S-3: Uso de `BigDecimal` para montos monetarios
+
+```java
+// ❌ NUNCA para dinero
+private double amount;
+private float taxRate;
+
+// ✅ BigDecimal con escala explícita
+private BigDecimal amount;
+
+// Mejor aún: Value Object
+public record Money(BigDecimal amount, Currency currency) {
+    public Money {
+        Objects.requireNonNull(amount);
+        if (amount.scale() > currency.getDefaultFractionDigits()) {
+            throw new IllegalArgumentException("Invalid scale for currency");
+        }
+    }
+    
+    public Money add(Money other) {
+        assertSameCurrency(other);
+        return new Money(this.amount.add(other.amount), this.currency);
+    }
+}
+```
+
+---
+
+## Checklist de revisión cuando compartas el código
+
+| Área | Qué verifico |
+|---|---|
+| **Transacciones** | Boundaries correctos, rollback configurado |
+| **Concurrencia** | Race conditions en pagos, optimistic locking |
+| **Seguridad** | Autorización por orden (¿puede este user ver esta orden?) |
+| **Resiliencia** | Timeouts, circuit breakers, retries con backoff |
+| **Testing** | Cobertura de casos límite, mocks vs integracion |
+| **Performance** | N+1 queries, fetch strategies, paginación |
+
+---
+
+**Comparte el código fuente** y haré el análisis línea por línea con referencias exactas. 🎯
